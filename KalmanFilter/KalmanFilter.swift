@@ -4,12 +4,13 @@
 //
 //  Created by Jialiang Cao on 7/22/25.
 //
+
 import CoreLocation
 import CoreMotion
 
 // 2D Kalman Filter for position (x, y) and velocity (vx, vy)
 class KalmanFilter {
-    // MARK: - State (x = [px, py, vx, vy])
+    // MARK: - State (X subk = [px, py, vx, vy])
     private(set) var px: Double = 0
     private(set) var py: Double = 0
     private(set) var vx: Double = 0
@@ -18,13 +19,14 @@ class KalmanFilter {
     // MARK: - Covariance & Noise Matrices
     // P: 4x4 state covariance, how certain we are about how each value affects another from [-1, 1]: negative correlation -> positive correlation
     private var P: [[Double]] = Array(repeating: Array(repeating: 0, count: 4), count: 4)
-    // Q: 4x4 Process noise covariance, how much we expect the IMU to be noisy or rough
-    private let Q: [[Double]]
-    // H: 2x4 Observation Model (maps state to GPS measurement) only 2x4 because GPS only tells us about px and py
+   // H: 2x4 Observation Model (maps state to GPS measurement) only 2x4 because GPS only tells us about px and py
     private let H: [[Double]] = [
         [1, 0, 0, 0],
         [0, 1, 0, 0]
     ]
+    // Q: 4x4 Process noise covariance, how much we expect the IMU to be noisy or rough
+    private let Q: [[Double]]
+ 
     
     // MARK: - Origin for local ENU projection
     private let originLat: Double
@@ -39,7 +41,7 @@ class KalmanFilter {
     (
         origin: CLLocationCoordinate2D,
         initialUncertainty: Double = 10,
-        processNoise: Double = 1e-2 // 0.01
+        processNoise: Double = 0.05 // Might need to update to reflect meters
     ) {
         self.originLat = origin.latitude
         self.originLon = origin.longitude
@@ -48,6 +50,7 @@ class KalmanFilter {
             P[i][i] = initialUncertainty
         }
         
+        // Higher processNoise trusts GPS more
         Q = [
             [processNoise, 0, 0, 0],
             [0, processNoise, 0, 0],
@@ -69,13 +72,10 @@ class KalmanFilter {
         // [ py ] = [0 1 0  dt][py] + [0     ½dt²][ay]
         // [ vx ]   [0 0 1  0 ][vx]   [dt    0   ][ax]
         // [ vy ]   [0 0 0  1 ][vy]   [0     dt  ][ay]
-        
-        let dt2 = 0.5 * dt * dt // distance under constant acceleration
-        
-        // Predict new state
         //  -   vx * dt = distance traveled keeping old velocity for dt seconds
         //  -   ax * dt2 = extra distance added by acceleration
         //  -   Finally update vx, speed, for next step
+        let dt2 = 0.5 * dt * dt // Formula for distance under constant acceleration
         px += vx * dt + ax * dt2
         py += vy * dt + ay * dt2
         vx += ax * dt
@@ -131,6 +131,7 @@ class KalmanFilter {
             R
         )
         
+        // Kalman Gain
         // Compute "trust GPS vs prediction"
         // K = P * H^T * S^-1 (4x2)
         let K = multiply4x2_2x2(

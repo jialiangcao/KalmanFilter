@@ -28,6 +28,7 @@ class ViewModel: NSObject, ObservableObject {
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.distanceFilter = kCLDistanceFilterNone
         locationManager.requestWhenInUseAuthorization()
         locationManager.startUpdatingLocation()
         
@@ -37,12 +38,12 @@ class ViewModel: NSObject, ObservableObject {
     // MARK: - Accelerometer Handling
     private func startAccelerometer() {
         guard motionManager.isAccelerometerAvailable else { return }
-        motionManager.deviceMotionUpdateInterval = 0.10  // 10 Hz
+        motionManager.deviceMotionUpdateInterval = 0.05
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] data, err in
             guard let self = self, let acc = data?.userAcceleration else { return }
-            // Converts to meters
-            let ax = acc.x < 0.05 ? 0 : acc.x * 9.81
-            let ay = acc.y < 0.05 ? 0 : acc.y * 9.81
+            // Converts to meters with clamp on bottom end for drift
+            let ax = acc.x < 0.01 ? 0 : acc.x * 9.81
+            let ay = acc.y < 0.01 ? 0 : acc.y * 9.81
             let dt = self.motionManager.deviceMotionUpdateInterval
             self.kalmanFilter?.predict(ax: ax, ay: ay, dt: dt)
             self.publishFilteredCoordinate()
@@ -53,9 +54,6 @@ class ViewModel: NSObject, ObservableObject {
     private func publishFilteredCoordinate() {
         guard let filter = kalmanFilter else { return }
         let latLon = filter.xyToGps(x: filter.px, y: filter.py)
-        print("Filtered local position ========")
-        print("localX: \(filter.px)")
-        print("localY: \(filter.py)")
         DispatchQueue.main.async {
             self.filteredCoordinate = latLon
             self.filteredPath.append(latLon)
