@@ -67,7 +67,7 @@ final class KalmanFilterTests: XCTestCase {
         var noisyGPS: [CLLocationCoordinate2D] = []
         for gt in groundTruthXY {
             let angle = Double.random(in: 0..<(2 * .pi))
-            let radius = Double.random(in: 5...10)
+            let radius = Double.random(in: 20...40) // Lower, upper bound for noise
             let nx = gt.x + radius * cos(angle)
             let ny = gt.y + radius * sin(angle)
             noisyXY.append((x: nx, y: ny))
@@ -78,7 +78,7 @@ final class KalmanFilterTests: XCTestCase {
         let totalAccelSamples = Int(duration * accelHz)
         var accelStream: [(ax: Double, ay: Double)] = []
         for _ in 0..<totalAccelSamples {
-            let noise = Double.random(in: -0.002...0.002)
+            let noise = Double.random(in: -0.002...0.002) // MEAN ZERO ACCELERATION
             accelStream.append((ax: noise, ay: noise))
         }
 
@@ -92,8 +92,8 @@ final class KalmanFilterTests: XCTestCase {
             if i % Int(accelHz) == 0, gpsIndex < noisyGPS.count {
                 let fix = CLLocation(coordinate: noisyGPS[gpsIndex],
                                      altitude: 0,
-                                     horizontalAccuracy: 7.5,
-                                     verticalAccuracy: 5,
+                                     horizontalAccuracy: 30,
+                                     verticalAccuracy: 1,
                                      timestamp: Date())
                 kf.update(with: fix)
                 filteredXY.append((x: kf.px, y: kf.py))

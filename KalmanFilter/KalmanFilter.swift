@@ -7,26 +7,27 @@
 
 import CoreLocation
 import CoreMotion
+import simd
 
 // 2D Kalman Filter for position (x, y) and velocity (vx, vy)
 class KalmanFilter {
     // MARK: - State (X subk = [px, py, vx, vy])
-    private(set) var px: Double = 0
-    private(set) var py: Double = 0
-    private(set) var vx: Double = 0
-    private(set) var vy: Double = 0
+    private(set) var state = simd_double4(0, 0, 0, 0)
     
     // MARK: - Covariance & Noise Matrices
     // P: 4x4 state covariance, how certain we are about how each value affects another from [-1, 1]: negative correlation -> positive correlation
-    private var P: [[Double]] = Array(repeating: Array(repeating: 0, count: 4), count: 4)
-   // H: 2x4 Observation Model (maps state to GPS measurement) only 2x4 because GPS only tells us about px and py
-    private let H: [[Double]] = [
-        [1, 0, 0, 0],
-        [0, 1, 0, 0]
-    ]
+    private var P = simd_double4x4(0)
+
     // Q: 4x4 Process noise covariance, how much we expect the IMU to be noisy or rough
-    private let Q: [[Double]]
- 
+    private let Q : simd_double4x4
+    
+   // H: 4x4 Observation Model
+    private let H = simd_double4x4(rows: [
+        simd_double4(1, 0, 0, 0),
+        simd_double4(0, 1, 0, 0),
+        simd_double4(0, 0, 0, 0),
+        simd_double4(0, 0, 0, 0)
+    ])
     
     // MARK: - Origin for local ENU projection
     private let originLat: Double
@@ -40,8 +41,7 @@ class KalmanFilter {
     init
     (
         origin: CLLocationCoordinate2D,
-        initialUncertainty: Double = 10,
-        processNoise: Double = 0.002 // Might need to update to reflect meters
+        initialUncertainty: Double = 3, // Small 1-10 trusts initial estimate, large > 100 is very uncertain
     ) {
         self.originLat = origin.latitude
         self.originLon = origin.longitude
@@ -50,13 +50,18 @@ class KalmanFilter {
             P[i][i] = initialUncertainty
         }
         
-        // Higher processNoise trusts GPS more
-        Q = [
-            [processNoise, 0, 0, 0],
-            [0, processNoise, 0, 0],
-            [0, 0, processNoise, 0],
-            [0, 0, 0, processNoise]
-        ]
+        // Process Noise Covariance
+        // Variance of noise (square of standard deviation) in that state variable
+        // Represents how uncertain we are between model predictions
+        // Experiment with sigma_p
+        let sigma_p = 0.5
+        let sigma_v = 0.0447
+        Q = simd_double4x4(rows: [
+            simd_double4(sigma_p*sigma_p, 0, 0, 0),
+            simd_double4(0, sigma_p*sigma_p, 0, 0),
+            simd_double4(0, 0, sigma_v*sigma_v, 0),
+            simd_double4(0, 0, 0, sigma_v*sigma_v)
+        ])
     }
     
     // MARK: - Predict Step
@@ -78,85 +83,97 @@ class KalmanFilter {
         //  -   ax * dt2 = extra distance added by acceleration
         //  -   Finally update vx, speed, for next step
         let dt2 = 0.5 * dt * dt // Formula for distance under constant acceleration
-        px += vx * dt + ax * dt2
-        py += vy * dt + ay * dt2
-        vx += ax * dt
-        vy += ay * dt
         
-        let F: [[Double]] = [
-            [1,   0,  dt, 0],
-            [0,   1,  0,  dt],
-            [0,   0,  1,  0],
-            [0,   0,  0,  1]
-        ]
+        let F = simd_double4x4(rows: [
+            simd_double4(1, 0, dt, 0),
+            simd_double4(0, 1, 0, dt),
+            simd_double4(0, 0, 1, 0),
+            simd_double4(0, 0, 0, 1)
+        ])
 
-        let B: [[Double]] = [
-            [dt2,  0],
-            [0,   dt2],
-            [dt,   0],
-            [0,    dt]
-        ]
+        let B = simd_double4x4(rows: [
+            simd_double4(dt2, 0, 0, 0),
+            simd_double4(0, dt2, 0, 0),
+            simd_double4(dt, 0, 0, 0),
+            simd_double4(0, dt, 0, 0)
+        ])
         
-        // Convert P to Matrix type, do P = F·P·Fᵀ + B·Q_acc·Bᵀ + Q
+        let u = simd_double4(ax, ay, 0, 0)
+        state = F * state + B * u
+        
+        // P' = F * P * F^T (transposed) + Q
+        // Or P = F·P·Fᵀ + B·Q_acc·Bᵀ + Q
         // But for simplicity, we approximate process noise by adding Q directly:
-        P = multiply4x4(F, multiply4x4(P, transpose4x4(F)))
-        P = add4x4(P, Q)
+        P = F * P * F.transpose + Q
     }
     
     // MARK: - Update Step
     //
-    // Called every GPS update
-    // Uses 'horizontalAccuracy' as 1sd in meters
-    //
     // - Parameters:
     //      - GPS CoreLocation reading
+    //      TODO: Add velocity in update
+    //
+    // Steps:
+    //    Compute predicted measurement: z^=Hx^z^=Hx^
+    //
+    //    Calculate innovation (residual): y=z−z^y=z−z^
+    //
+    //    Compute innovation covariance: S=HPHT+RS=HPHT+R
+    //
+    //    Compute Kalman gain: K=PHTS−1K=PHTS−1
+    //
+    //    Update state estimate: x^=x^+Kyx^=x^+Ky
+    //
+    //    Update estimate covariance: P=(I−KH)PP=(I−KH)P
     func update(with gps: CLLocation) {
         // Convert GPS lat/lon to local x,y in meters
+        // z, standard notation for noisy measurement
         let (zpx, zpy) = gpsToXY(coord: gps.coordinate)
-        let sd = gps.horizontalAccuracy
-        let R: [[Double]] = [
-            [sd*sd, 0],
-            [0, sd*sd]
-        ]
+        let z = simd_double4(zpx, zpy, 0, 0)
         
-        // Difference between GPS reading and predicted position
+        // Measurement Noise Covariance
+        // Represents how noisy or uncertain the measurements are
+        let sigma_p = gps.horizontalAccuracy
+        let sigma_v = 1e6 // velocity is not being measured here
+        let sp2 = sigma_p * sigma_p
+
+        let R = simd_double4x4(diagonal: simd_double4(
+            sp2,
+            sp2,
+            sigma_v,
+            sigma_v
+        ))
+        
+        // Residual, difference between GPS reading and predicted position
         // y = z - H * x
-        let y0 = zpx - px
-        let y1 = zpy - py
+        let y = z - H * state
         
-        // Blend uncertainties
-        // S = H * P * H^T + R (2x2)
-        let Ht = transpose4x2(H)
-        let PHt = multiply4x4_4x2(P, Ht)
-        let S = add2x2(
-            multiply2x4_4x2(H, PHt),
-            R
-        )
+        // Innovation covariance matrix
+        // S = H * P * H^T + R
+        let S = H * P * H.transpose + R
         
         // Kalman Gain
         // Compute "trust GPS vs prediction"
-        // K = P * H^T * S^-1 (4x2)
-        let K = multiply4x2_2x2(
-            PHt,
-            invert2x2(S)
-        )
+        // K = P * H^T * S^-1
+        let K = P * H.transpose * S.inverse
         
-        // Apply blend to correct position & speed
+        // Update State estimate
         // x = x + K * y
-        let dy = [y0, y1]
-        let dx = multiply4x2Vector(K, dy) // 4x2 * 2x1 -> 4x1 vector
-        px += dx[0]
-        py += dx[1]
-        vx += dx[2]
-        vy += dx[3]
+        state += K * y
         
-        // Update covariance
-        // P = (I sub4 - K * H) * P
-        let KH = multiply4x2_2x4(K, H)
-        let I = identity4x4()
-        let IminusKH = subtract4x4(I, KH)
-        P = multiply4x4(IminusKH, P)
+        // Update estimate covariance
+        // P = (I - K * H) * P
+        let I = matrix_identity_double4x4
+        P = (I - K * H) * P
     }
+
+    // Accessors
+    var px: Double { state[0] }
+    var py: Double { state[1] }
+    var vx: Double { state[2] }
+    var vy: Double { state[3] }
+    
+    // MARK: - Coordinate Helpers
     
     // Convert GPS to local flat meters (ENU projection)
     func gpsToXY(coord: CLLocationCoordinate2D) -> (x: Double, y: Double) {
