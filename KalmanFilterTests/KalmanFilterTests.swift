@@ -61,6 +61,8 @@ final class KalmanFilterTests: XCTestCase {
             let baseY = t * kf.gpsToXY(coord: point2).y
             groundTruthXY.append((x: baseX, y: baseY))
         }
+        
+        var noisyXY: [(x: Double, y: Double)] = []
 
         var noisyGPS: [CLLocationCoordinate2D] = []
         for gt in groundTruthXY {
@@ -68,6 +70,7 @@ final class KalmanFilterTests: XCTestCase {
             let radius = Double.random(in: 5...10)
             let nx = gt.x + radius * cos(angle)
             let ny = gt.y + radius * sin(angle)
+            noisyXY.append((x: nx, y: ny))
             noisyGPS.append(kf.xyToGps(x: nx, y: ny))
         }
 
@@ -89,7 +92,7 @@ final class KalmanFilterTests: XCTestCase {
             if i % Int(accelHz) == 0, gpsIndex < noisyGPS.count {
                 let fix = CLLocation(coordinate: noisyGPS[gpsIndex],
                                      altitude: 0,
-                                     horizontalAccuracy: 5,
+                                     horizontalAccuracy: 7.5,
                                      verticalAccuracy: 5,
                                      timestamp: Date())
                 kf.update(with: fix)
@@ -116,11 +119,17 @@ final class KalmanFilterTests: XCTestCase {
             sumFiltError += sqrt(dx*dx + dy*dy)
         }
         let avgFiltError = sumFiltError / Double(filteredXY.count)
-
+        print("")
+        for i in 0..<min(groundTruthXY.count, filteredXY.count) {
+            print("==== Time Step \(i) ====")
+            print("Ground Truth: \(groundTruthXY[i])")
+            print("Noisy Input: \(noisyXY[i])")
+            print("Filtered Output: \(filteredXY[i])")
+        }
         print("======================================")
         print("Average RAW GPS error      = \(avgRawError) m")
         print("Average FILTERED GPS error = \(avgFiltError) m")
-        print("Error reduction            = \(1 - (avgFiltError/avgRawError)*100)%")
+        print("Error reduction            = \((1 - (avgFiltError/avgRawError))*100)% better")
         print("======================================")
     }
 
