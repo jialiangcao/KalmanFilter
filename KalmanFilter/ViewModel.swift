@@ -22,14 +22,17 @@ class ViewModel: NSObject, ObservableObject {
     private let motionManager = CMMotionManager()
     private let locationManager = CLLocationManager()
     private var kalmanFilter: KalmanFilter?
+    private var currentHeadingRadians: Double = 0.0
     
     // MARK: - Initialization
     override init() {
         super.init()
         locationManager.delegate = self
+        locationManager.headingFilter = kCLHeadingFilterNone
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         locationManager.distanceFilter = kCLDistanceFilterNone
         locationManager.requestWhenInUseAuthorization()
+        locationManager.startUpdatingHeading()
         locationManager.startUpdatingLocation()
         
         startAccelerometer()
@@ -41,11 +44,12 @@ class ViewModel: NSObject, ObservableObject {
         motionManager.deviceMotionUpdateInterval = 0.05
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] data, err in
             guard let self = self, let acc = data?.userAcceleration else { return }
-            // Converts to meters with clamp on bottom end for drift
-            let ax = acc.x < 0.01 ? 0 : acc.x * 9.81
-            let ay = acc.y < 0.01 ? 0 : acc.y * 9.81
+            // Converts to meters
+            let ax = acc.x * 9.81
+            let ay = acc.y * 9.81
             let dt = self.motionManager.deviceMotionUpdateInterval
-            self.kalmanFilter?.predict(ax: ax, ay: ay, dt: dt)
+//            print("Heading Radians: \(self.currentHeadingRadians)")
+            self.kalmanFilter?.predict(ax: ax, ay: ay, headingRadians: self.currentHeadingRadians, dt: dt)
             self.publishFilteredCoordinate()
         }
     }
@@ -72,11 +76,16 @@ extension ViewModel: CLLocationManagerDelegate {
         }
         // Initialize Kalman filter at first GPS fix
         if kalmanFilter == nil {
-            kalmanFilter = KalmanFilter(origin: loc.coordinate)
+            kalmanFilter = KalmanFilter(origin: loc)
         }
         // Run update step
         kalmanFilter?.update(with: loc)
         publishFilteredCoordinate()
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        let headingDegrees = newHeading.trueHeading > 0 ? newHeading.trueHeading : newHeading.magneticHeading
+        currentHeadingRadians = headingDegrees * .pi / 180
     }
     
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

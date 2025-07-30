@@ -18,8 +18,6 @@ class KalmanFilter {
     // P: 4x4 state covariance, how certain we are about how each value affects another from [-1, 1]: negative correlation -> positive correlation
     private var P = simd_double4x4(0)
 
-    // Q: 4x4 Process noise covariance, how much we expect the IMU to be noisy or rough
-    private let Q : simd_double4x4
     
    // H: 4x4 Observation Model
     private let H = simd_double4x4(rows: [
@@ -40,28 +38,28 @@ class KalmanFilter {
     //      - processNoise: assumed process noise variance on acceleration (m^2 / s^4)
     init
     (
-        origin: CLLocationCoordinate2D,
-        initialUncertainty: Double = 3, // Small 1-10 trusts initial estimate, large > 100 is very uncertain
+        origin: CLLocation,
     ) {
-        self.originLat = origin.latitude
-        self.originLon = origin.longitude
+        let coord = origin.coordinate
+        self.originLat = coord.latitude
+        self.originLon = coord.longitude
         
-        for i in 0..<4 {
-            P[i][i] = initialUncertainty
+        // Convert horizontal accuracy (95% radius) to 1-sigma std dev for position
+        // 95% confidence ~ 2 sigma, so sigma = radius / 2
+        let sigma_p = origin.horizontalAccuracy / 2.0
+        let sigma_p2 = sigma_p * sigma_p
+        
+        // Velocity initial uncertainty m^2/s
+        let sigma_v = 0.25
+        let sigma_v2 = sigma_v * sigma_v
+        
+        for i in 0..<2 {
+            P[i][i] = sigma_p2
         }
         
-        // Process Noise Covariance
-        // Variance of noise (square of standard deviation) in that state variable
-        // Represents how uncertain we are between model predictions
-        // Experiment with sigma_p
-        let sigma_p = 0.5
-        let sigma_v = 0.0447
-        Q = simd_double4x4(rows: [
-            simd_double4(sigma_p*sigma_p, 0, 0, 0),
-            simd_double4(0, sigma_p*sigma_p, 0, 0),
-            simd_double4(0, 0, sigma_v*sigma_v, 0),
-            simd_double4(0, 0, 0, sigma_v*sigma_v)
-        ])
+        for i in 2..<4 {
+            P[i][i] = sigma_v2
+        }
     }
     
     // MARK: - Predict Step
@@ -73,7 +71,7 @@ class KalmanFilter {
     //      - dt: time delta since last predict call (s)
     
     // TODO: Velocity should not be updated with noisy IMU here
-    func predict(ax: Double, ay: Double, dt: Double) {
+    func predict(ax: Double, ay: Double, headingRadians: Double, dt: Double) {
         // State transition F for constant‐velocity + control:
         // [ px ]   [1 0 dt 0 ][px]   [½dt²  0   ][ax]
         // [ py ] = [0 1 0  dt][py] + [0     ½dt²][ay]
@@ -82,6 +80,11 @@ class KalmanFilter {
         //  -   vx * dt = distance traveled keeping old velocity for dt seconds
         //  -   ax * dt2 = extra distance added by acceleration
         //  -   Finally update vx, speed, for next step
+
+        // Rotate according to true north
+        let accX = ax * cos(-headingRadians) - ay * sin(-headingRadians)
+        let accY = ax * sin(-headingRadians) + ay * cos(-headingRadians)
+
         let dt2 = 0.5 * dt * dt // Formula for distance under constant acceleration
         
         let F = simd_double4x4(rows: [
@@ -98,13 +101,40 @@ class KalmanFilter {
             simd_double4(0, dt, 0, 0)
         ])
         
-        let u = simd_double4(ax, ay, 0, 0)
+        let u = simd_double4(accX, accY, 0, 0)
         state = F * state + B * u
+        
+        // Process noise covariance Q scaled by dt:
+         // For constant acceleration model, Q is:
+         // Q_pos = (dt^4)/4 * accelNoiseVar
+         // Q_vel = dt^2 * accelNoiseVar
+         // Off-diagonal terms = (dt^3)/2 * accelNoiseVar
+         
+        let accelNoiseVar = 0.25 * 0.25
+        // Position variance due to integrated acceleration noise
+         let q11 = (dt * dt * dt * dt) / 4.0 * accelNoiseVar
+        // Covariance between position and velocity
+         let q13 = (dt * dt * dt) / 2.0 * accelNoiseVar
+        // Velocity variance due to acceleration noise
+         let q33 = dt * dt * accelNoiseVar
+         
+         let Q = simd_double4x4(rows: [
+             simd_double4(q11, 0,   q13, 0),
+             simd_double4(0,   q11, 0,   q13),
+             simd_double4(q13, 0,   q33, 0),
+             simd_double4(0,   q13, 0,   q33)
+         ])
         
         // P' = F * P * F^T (transposed) + Q
         // Or P = F·P·Fᵀ + B·Q_acc·Bᵀ + Q
         // But for simplicity, we approximate process noise by adding Q directly:
         P = F * P * F.transpose + Q
+//        print("Predict P")
+//        print(P)
+//        print("======")
+//        print("Velocity X Meters: \(vx)")
+//        print("Velocity Y Meters: \(vy)")
+//        print("====")
     }
     
     // MARK: - Update Step
@@ -133,15 +163,16 @@ class KalmanFilter {
         
         // Measurement Noise Covariance
         // Represents how noisy or uncertain the measurements are
-        let sigma_p = gps.horizontalAccuracy
-        let sigma_v = 1e6 // velocity is not being measured here
+        let sigma_p = gps.horizontalAccuracy / 2.0
+        let sigma_v = 0.002
         let sp2 = sigma_p * sigma_p
+        let sv2 = sigma_v * sigma_v
 
         let R = simd_double4x4(diagonal: simd_double4(
             sp2,
             sp2,
-            sigma_v,
-            sigma_v
+            sv2,
+            sv2
         ))
         
         // Residual, difference between GPS reading and predicted position
@@ -165,6 +196,8 @@ class KalmanFilter {
         // P = (I - K * H) * P
         let I = matrix_identity_double4x4
         P = (I - K * H) * P
+//        print("Update P")
+//        print(P)
     }
 
     // Accessors

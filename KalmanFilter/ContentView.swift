@@ -59,10 +59,10 @@ struct MapView: UIViewRepresentable {
         uiView.addOverlay(filteredLine)
         
         // Center on first filtered point
-        if let first = filteredCoordinates.first {
-            let region = MKCoordinateRegion(center: first,
-                                            span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003))
-            uiView.setRegion(region, animated: true)
+        if let last = filteredCoordinates.last {
+            let region = MKCoordinateRegion(center: last,
+                                            span: MKCoordinateSpan(latitudeDelta: 0.0015, longitudeDelta: 0.0015))
+            uiView.setRegion(region, animated: false)
         }
     }
 
