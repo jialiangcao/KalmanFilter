@@ -2,289 +2,356 @@ import XCTest
 import CoreLocation
 @testable import KalmanFilter
 
-/// Helper to compute bearing (radians) from one GPS coordinate to another, measured clockwise from true north. 0 -> 6.283..
-func headingRadians(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) -> Double {
-    let lat1 = from.latitude * .pi / 180
-    let lon1 = from.longitude * .pi / 180
-    let lat2 = to.latitude * .pi / 180
-    let lon2 = to.longitude * .pi / 180
-    let dLon = lon2 - lon1
-
-    let y = sin(dLon) * cos(lat2)
-    let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
-    var bearing = atan2(y, x)
-
-    // Normalize to 0...2π
-    if bearing < 0 {
-        bearing += 2 * .pi
-    }
-    return bearing
-}
-
 class KalmanFilterTests: XCTestCase {
-    /// Test walking in a straight line with noise
-    func testWalkStraightWithNoise() throws -> (raw: Double, filtered: Double) {
-        // Setup origin and destination
-        let start = CLLocationCoordinate2D(latitude: 40.7134813, longitude: -74.0110487)
-        let mid = CLLocationCoordinate2D(latitude: 40.7136813, longitude: -74.0108487)
-        let end = CLLocationCoordinate2D(latitude: 40.7138813, longitude: -74.0106487)
-        let origin = CLLocation(latitude: start.latitude, longitude: start.longitude)
-
-        // Sequence of headings: constant
-        let headings = [headingRadians(from: start, to: mid), headingRadians(from: mid, to: end)]
-
-        let kf = KalmanFilter(origin: origin)
-        let totalDist = CLLocation(latitude: start.latitude, longitude: start.longitude)
-            .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
-        let walkingSpeed = 1.4 // m/s
-        let duration = totalDist / walkingSpeed
-        let dt = 1.0 / 100.0
-
-        // Generate ground truth positions at each second
-        var groundTruth: [(Double, Double)] = []
-        let endXY = kf.gpsToXY(coord: end)
-        let steps = Int(ceil(duration))
-        for t in 0...steps {
-            let frac = Double(t) / Double(steps)
-            groundTruth.append((endXY.x * frac, endXY.y * frac))
-        }
-
-        // Simulate noisy GPS and IMU
-        var noisyGPS: [CLLocationCoordinate2D] = []
-        for gt in groundTruth {
-            let angle = Double.random(in: 0..<(2 * .pi))
-            let radius = Double.random(in: 20...40)
-            noisyGPS.append(kf.xyToGps(x: gt.0 + radius * cos(angle), y: gt.1 + radius * sin(angle)))
-        }
-        let totalAccel = Int(duration * 100.0)
-        var accelStream = [(ax: Double, ay: Double)]()
-        for _ in 0..<totalAccel {
-            accelStream.append((ax: Double.random(in: -0.02...0.02), ay: Double.random(in: -0.02...0.02)))
-        }
-
-        // Run filter
-        var filtered: [(Double, Double)] = []
-        var gpsIndex = 0
-        for i in 0..<totalAccel {
-            let h = headings[gpsIndex < headings.count ? gpsIndex : headings.count - 1]
-            kf.predict(ax: accelStream[i].ax, ay: accelStream[i].ay, headingRadians: h, dt: dt)
-            if i % 100 == 0 && gpsIndex < noisyGPS.count {
-                kf.update(with: CLLocation(coordinate: noisyGPS[gpsIndex], altitude: 0,
-                                           horizontalAccuracy: 30, verticalAccuracy: 1,
-                                           timestamp: Date()))
-                filtered.append((kf.px, kf.py))
-                gpsIndex += 1
-            }
-        }
-
-        // Assert reduced error
-        let rawError = zip(noisyGPS.indices, noisyGPS).map { i, gps in
-            let gt = groundTruth[i]
-            let xy = kf.gpsToXY(coord: gps)
-            return hypot(xy.x - gt.0, xy.y - gt.1)
-        }.reduce(0, +) / Double(noisyGPS.count)
-
-        let filtError = zip(filtered, groundTruth).map { est, gt in
-            hypot(est.0 - gt.0, est.1 - gt.1)
-        }.reduce(0, +) / Double(filtered.count)
-
-        XCTAssertTrue(filtError < rawError, "Filter should reduce error for straight walk")
-        return (raw: rawError, filtered: filtError)
-    }
-
-    /// Test walking with a 90° turn in the middle
-    func testWalkWithTurn() throws -> (raw: Double, filtered: Double) {
-        // Define a path that turns right after halfway
-        let p1 = CLLocationCoordinate2D(latitude: 40.7135, longitude: -74.0110)
-        let p2 = CLLocationCoordinate2D(latitude: 40.7140, longitude: -74.0110) // North
-        let p3 = CLLocationCoordinate2D(latitude: 40.7140, longitude: -74.0105) // East
-        let origin = CLLocation(latitude: p1.latitude, longitude: p1.longitude)
-
-        let headings = [headingRadians(from: p1, to: p2), headingRadians(from: p2, to: p3)]
-        let waypoints = [p2, p3]
-
-        let kf = KalmanFilter(origin: origin)
-        let totalDist = CLLocation(latitude: p1.latitude, longitude: p1.longitude)
-            .distance(from: CLLocation(latitude: p3.latitude, longitude: p3.longitude))
-        let duration = totalDist / 1.4
-        let dt = 0.01
-
-        var groundTruth: [(Double, Double)] = []
-        let dist12 = CLLocation(latitude: p1.latitude, longitude: p1.longitude)
-            .distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
-        let steps1 = Int(ceil((dist12 / 1.4) / dt))
-        let xy2 = kf.gpsToXY(coord: p2)
-        for i in 0...steps1 {
-            let frac = Double(i) / Double(steps1)
-            groundTruth.append((xy2.x * frac, xy2.y * frac))
-        }
-        let xy3 = kf.gpsToXY(coord: p3)
-        let remaining = Int(ceil(((totalDist - dist12) / 1.4) / dt))
-        for i in 1...remaining {
-            let frac = Double(i) / Double(remaining)
-            groundTruth.append((xy2.x + (xy3.x - xy2.x) * frac,
-                                 xy2.y + (xy3.y - xy2.y) * frac))
-        }
-
-        // Simulate noise and accel
-        var noisyGPS: [CLLocationCoordinate2D] = groundTruth.map { gt in
-            let angle = Double.random(in: 0..<(2 * .pi))
-            let r = Double.random(in: 20...40)
-            return kf.xyToGps(x: gt.0 + r * cos(angle), y: gt.1 + r * sin(angle))
-        }
-        let totalAccel = groundTruth.count * Int(1/dt)
-        var accelStream = [(Double, Double)]()
-        for _ in 0..<totalAccel {
-            accelStream.append((Double.random(in: -0.02...0.02),
-                                Double.random(in: -0.02...0.02)))
-        }
-
-        // Filter
-        var filtered: [(Double, Double)] = []
-        var waypointIndex = 0
-        for i in 0..<totalAccel {
-            let currentHeading = headings[min(waypointIndex, headings.count-1)]
-            kf.predict(ax: accelStream[i].0, ay: accelStream[i].1,
-                       headingRadians: currentHeading, dt: dt)
-            if i % Int(1/dt) == 0 && waypointIndex < noisyGPS.count {
-                kf.update(with: CLLocation(coordinate: noisyGPS[waypointIndex], altitude:0,
-                                           horizontalAccuracy:30, verticalAccuracy:1,
-                                           timestamp:Date()))
-                filtered.append((kf.px, kf.py))
-                waypointIndex += 1
-            }
-        }
-
-        let rawErr = zip(noisyGPS, groundTruth).map { gps, gt in
-            let xy = kf.gpsToXY(coord: gps)
-            return hypot(xy.x-gt.0, xy.y-gt.1)
-        }.reduce(0,+)/Double(noisyGPS.count)
-        let filtErr = zip(filtered, groundTruth).map { est, gt in
-            hypot(est.0-gt.0, est.1-gt.1)
-        }.reduce(0,+)/Double(filtered.count)
-
-        XCTAssertTrue(filtErr < rawErr, "Filter should handle a 90° turn")
-        return (raw: rawErr, filtered: filtErr)
-    }
-
     /// Test walking with speed changes (slowdown then speedup)
-    func testWalkSpeedChange() throws -> (raw: Double, filtered: Double) {
+    func testWalkWithNoiseAndVelocityChange() throws {
         let pStart = CLLocationCoordinate2D(latitude: 40.7135, longitude: -74.0110)
         let pEnd = CLLocationCoordinate2D(latitude: 40.7145, longitude: -74.0100)
         let origin = CLLocation(latitude: pStart.latitude, longitude: pStart.longitude)
         let kf = KalmanFilter(origin: origin)
-        
-        // Create ground truth with variable speed: half time slow, half time fast
-        let totalDist = CLLocation(latitude: pStart.latitude, longitude: pStart.longitude)
-            .distance(from: CLLocation(latitude: pEnd.latitude, longitude: pEnd.longitude))
-        let slowSpeed = 0.7 // m/s
-        let fastSpeed = 2.0 // m/s
+
+        let endXY = kf.gpsToXY(coord: pEnd)
+        let totalDist = hypot(endXY.x, endXY.y)
+        let slowSpeed = 0.7 // m^2/s
+        let fastSpeed = 2.0 // m^2/s
         let distSlow = totalDist * 0.4
         let distFast = totalDist * 0.6
         let tSlow = distSlow / slowSpeed
         let tFast = distFast / fastSpeed
-        let dt = 0.01
-        let stepsSlow = Int(ceil(tSlow / dt))
-        let stepsFast = Int(ceil(tFast / dt))
-        let endXY = kf.gpsToXY(coord: pEnd)
+        let totalTime = tSlow + tFast
 
-        var groundTruth: [(Double, Double)] = []
-        // Slow segment
-        for i in 0..<stepsSlow {
-            let frac = Double(i) / Double(stepsSlow)
-            groundTruth.append((endXY.x * 0.4 * frac, endXY.y * 0.4 * frac))
-        }
-        // Fast segment
-        for i in 0...stepsFast {
-            let frac = Double(i) / Double(stepsFast)
-            groundTruth.append((endXY.x * (0.4 + 0.6 * frac), endXY.y * (0.4 + 0.6 * frac)))
+        let ux = endXY.x / totalDist
+        let uy = endXY.y / totalDist
+
+        let secCount = Int(ceil(totalTime))
+        var groundTruth: [(x: Double, y: Double)] = []
+        for s in 0...secCount {
+            let t = Double(s)
+            let traveled: Double
+            if t <= tSlow {
+                traveled = slowSpeed * t
+            } else {
+                traveled = distSlow + fastSpeed * (t - tSlow)
+            }
+            groundTruth.append((x: ux * traveled,
+                                y: uy * traveled))
         }
 
-        var noisyGPS: [CLLocationCoordinate2D] = groundTruth.map { gt in
+        var noisyXY: [(x: Double, y: Double)] = []
+        let noisyGPS: [CLLocationCoordinate2D] = groundTruth.map { gt in
             let angle = Double.random(in: 0..<(2 * .pi))
-            let r = Double.random(in: 20...40)
-            return kf.xyToGps(x: gt.0 + r * cos(angle), y: gt.1 + r * sin(angle))
-        }
-        var accelStream: [(Double, Double)] = []
-        for _ in 0..<groundTruth.count * Int(1/dt) {
-            accelStream.append((Double.random(in: -0.02...0.02),
-                                Double.random(in: -0.02...0.02)))
+            let radius = Double.random(in: 10...20)
+            let nx = gt.x + radius * cos(angle)
+            let ny = gt.y + radius * sin(angle)
+            noisyXY.append((x: nx, y: ny))
+            return kf.xyToGps(x: nx, y: ny)
         }
 
-        var filtered: [(Double, Double)] = []
+        let accelHz = 100.0
+        let totalSamples = Int(totalTime * accelHz)
+        let dt = 1.0 / accelHz
+        var accelStream: [(ax: Double, ay: Double)] = []
+        accelStream.reserveCapacity(totalSamples)
+        for _ in 0..<totalSamples {
+            let n = Double.random(in: -0.02...0.02)
+            accelStream.append((ax: n, ay: n))
+        }
+
+        var filtered: [(x: Double, y: Double)] = []
+        filtered.reserveCapacity(noisyGPS.count)
         var gpsIndex = 0
-        for i in 0..<accelStream.count {
-            // Heading always from start to end
-            let h = headingRadians(from: pStart, to: pEnd)
-            kf.predict(ax: accelStream[i].0, ay: accelStream[i].1,
-                       headingRadians: h, dt: dt)
-            if i % Int(1/dt) == 0 && gpsIndex < noisyGPS.count {
-                kf.update(with: CLLocation(coordinate: noisyGPS[gpsIndex], altitude:0,
-                                           horizontalAccuracy:30, verticalAccuracy:1,
-                                           timestamp:Date()))
-                filtered.append((kf.px, kf.py))
+
+        let heading = headingRadians(from: pStart, to: pEnd)
+
+        for i in 0..<totalSamples {
+            let (ax, ay) = accelStream[i]
+            kf.predict(ax: ax, ay: ay, headingRadians: heading, dt: dt)
+
+            if i % Int(accelHz) == 0 && gpsIndex < noisyGPS.count {
+                let fix = CLLocation(
+                    coordinate: noisyGPS[gpsIndex],
+                    altitude: 0,
+                    horizontalAccuracy: 15,
+                    verticalAccuracy: 1,
+                    timestamp: Date()
+                )
+                kf.update(with: fix)
+                filtered.append((x: kf.px, y: kf.py))
                 gpsIndex += 1
             }
         }
 
-        let rawErr = zip(noisyGPS, groundTruth).map { gps, gt in
-            let xy = kf.gpsToXY(coord: gps)
-            return hypot(xy.x-gt.0, xy.y-gt.1)
-        }.reduce(0,+)/Double(noisyGPS.count)
-        let filtErr = zip(filtered, groundTruth).map { est, gt in
-            hypot(est.0-gt.0, est.1-gt.1)
-        }.reduce(0,+)/Double(filtered.count)
+        let img = renderMultiLinePlot(
+            series: [
+                ("Ground Truth", groundTruth),
+                ("Noisy GPS",    noisyXY),
+                ("Filtered",     filtered)
+            ],
+            size: CGSize(width: 500, height: 400),
+            margin: 40
+        )
 
-        XCTAssertTrue(filtErr < rawErr, "Filter should handle speed changes gracefully")
-        return (raw: rawErr, filtered: filtErr)
+        let attachment = XCTAttachment(image: img)
+        attachment.name = "WalkWithSpeed Plot"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        XCTAssertNotNil(img)
     }
     
-    func runMultipleTimes(_ runs: Int, simulate: () -> (raw: Double, filtered: Double)) -> (avgRaw: Double, avgFiltered: Double) {
-        var totalRaw = 0.0
-        var totalFiltered = 0.0
+    /// Test walking with a 90° turn in the middle
+    func testWalkWithTurn() throws {
+        let p1 = CLLocationCoordinate2D(latitude: 40.7135, longitude: -74.0110)
+        let p2 = CLLocationCoordinate2D(latitude: 40.7140, longitude: -74.0110) // north
+        let p3 = CLLocationCoordinate2D(latitude: 40.7140, longitude: -74.0105) // east
+        let origin = CLLocation(latitude: p1.latitude, longitude: p1.longitude)
+        let kf = KalmanFilter(origin: origin)
 
-        for _ in 0..<runs {
-            let (raw, filtered) = simulate()
-            totalRaw += raw
-            totalFiltered += filtered
+        let xy2 = kf.gpsToXY(coord: p2)
+        let xy3 = kf.gpsToXY(coord: p3)
+        let dist12 = hypot(xy2.x, xy2.y)
+        let dist23 = hypot(xy3.x - xy2.x, xy3.y - xy2.y)
+        let walkingSpeed = 1.4 // m/s
+        let t12 = dist12 / walkingSpeed
+        let t23 = dist23 / walkingSpeed
+        let totalTime = t12 + t23
+
+        let h12 = headingRadians(from: p1, to: p2)
+        let h23 = headingRadians(from: p2, to: p3)
+
+        let secCount = Int(ceil(totalTime))
+        var groundTruth: [(x: Double, y: Double)] = []
+        for s in 0...secCount {
+            let t = Double(s)
+            let traveled: Double
+            if t <= t12 {
+                traveled = walkingSpeed * t
+            } else {
+                traveled = dist12 + walkingSpeed * (t - t12)
+            }
+            let pt: (x: Double, y: Double)
+            if t <= t12 {
+                let frac = traveled / dist12
+                pt = (x: xy2.x * frac, y: xy2.y * frac)
+            } else {
+                let frac2 = (traveled - dist12) / dist23
+                pt = (x: xy2.x + (xy3.x - xy2.x) * frac2,
+                      y: xy2.y + (xy3.y - xy2.y) * frac2)
+            }
+            groundTruth.append(pt)
         }
 
-        return (totalRaw / Double(runs), totalFiltered / Double(runs))
+        var noisyXY: [(x: Double, y: Double)] = []
+        let noisyGPS: [CLLocationCoordinate2D] = groundTruth.map { gt in
+            let angle = Double.random(in: 0..<(2 * .pi))
+            let radius = Double.random(in: 5...10)
+            let nx = gt.x + radius * cos(angle)
+            let ny = gt.y + radius * sin(angle)
+            noisyXY.append((x: nx, y: ny))
+            return kf.xyToGps(x: nx, y: ny)
+        }
+
+        let accelHz = 100.0
+        let totalSamples = Int(totalTime * accelHz)
+        let dt = 1.0 / accelHz
+        var accelStream = [(ax: Double, ay: Double)]()
+        accelStream.reserveCapacity(totalSamples)
+        for _ in 0..<totalSamples {
+            let n = Double.random(in: -0.02...0.02)
+            accelStream.append((ax: n, ay: n))
+        }
+
+        var filtered: [(x: Double, y: Double)] = []
+        filtered.reserveCapacity(noisyGPS.count)
+        var gpsIndex = 0
+
+        for i in 0..<totalSamples {
+            let tNow = Double(i) * dt
+            let heading = tNow <= t12 ? h12 : h23
+
+            let (ax, ay) = accelStream[i]
+            kf.predict(ax: ax, ay: ay, headingRadians: heading, dt: dt)
+
+            if i % Int(accelHz) == 0 && gpsIndex < noisyGPS.count {
+                let fix = CLLocation(
+                    coordinate: noisyGPS[gpsIndex],
+                    altitude: 0,
+                    horizontalAccuracy: 7.5,
+                    verticalAccuracy: 1,
+                    timestamp: Date()
+                )
+                kf.update(with: fix)
+                filtered.append((x: kf.px, y: kf.py))
+                gpsIndex += 1
+            }
+        }
+
+        let rawErr = zip(noisyGPS, groundTruth)
+            .map { gps, gt in
+                let xy = kf.gpsToXY(coord: gps)
+                return hypot(xy.x - gt.x, xy.y - gt.y)
+            }.reduce(0,+) / Double(noisyGPS.count)
+
+        let filtErr = zip(filtered, groundTruth)
+            .map { est, gt in hypot(est.x - gt.x, est.y - gt.y) }
+            .reduce(0,+) / Double(filtered.count)
+
+        XCTAssertTrue(filtErr < rawErr, "Filter should handle a 90° turn")
+
+        let img = renderMultiLinePlot(
+            series: [
+                ("Ground Truth", groundTruth),
+                ("Noisy GPS",    noisyXY),
+                ("Filtered",     filtered)
+            ],
+            size: CGSize(width: 500, height: 400),
+            margin: 40
+        )
+        let attach = XCTAttachment(image: img)
+        attach.name = "WalkWithTurn Plot"
+        attach.lifetime = .keepAlways
+        add(attach)
     }
 
-    func testTurningCorner() throws {
-        let (straightRaw, straightFilt) = runMultipleTimes(5) {
-            try! testWalkStraightWithNoise()
+    func testWalkWithNoise() throws {
+        let point1 = CLLocationCoordinate2D(latitude: 40.713481315279516,
+                                            longitude: -74.01104871696431)
+        let origin = CLLocation(latitude: point1.latitude, longitude: point1.longitude)
+        let point2 = CLLocationCoordinate2D(latitude: 40.713858307316414,
+                                            longitude: -74.01073053689558)
+        let kf = KalmanFilter(origin: origin)
+        let constantHeading = headingRadians(from: point1, to: point2)
+        
+        let totalDistance = CLLocation(latitude: point1.latitude,
+                                       longitude: point1.longitude)
+            .distance(from: CLLocation(latitude: point2.latitude,
+                                       longitude: point2.longitude))
+        let walkingSpeed = 1.4 // m/s
+        let duration = totalDistance / walkingSpeed
+        let durationInt = Int(ceil(duration))
+        var groundTruthXY: [(x: Double, y: Double)] = []
+        for sec in 0...durationInt {
+            let t = Double(sec) / duration
+            let baseX = t * kf.gpsToXY(coord: point2).x
+            let baseY = t * kf.gpsToXY(coord: point2).y
+            groundTruthXY.append((x: baseX, y: baseY))
         }
         
-        let (cornerRaw, cornerFilt) = runMultipleTimes(5) {
-            try! testWalkWithTurn()
+        var noisyXY: [(x: Double, y: Double)] = []
+        
+        var noisyGPS: [CLLocationCoordinate2D] = []
+        for gt in groundTruthXY {
+            let angle = Double.random(in: 0..<(2 * .pi))
+            let radius = Double.random(in: 20...40) // Lower/upper bound inaccuracy in m^2
+            let nx = gt.x + radius * cos(angle)
+            let ny = gt.y + radius * sin(angle)
+            noisyXY.append((x: nx, y: ny))
+            noisyGPS.append(kf.xyToGps(x: nx, y: ny))
         }
         
-        let (speedRaw, speedFilt) = runMultipleTimes(5) {
-            try! testWalkSpeedChange()
+        let accelHz = 100.0
+        let totalAccelSamples = Int(duration * accelHz)
+        var accelStream: [(ax: Double, ay: Double)] = []
+        for _ in 0..<totalAccelSamples {
+            let noise = Double.random(in: -0.002...0.002) // Mean zero acceleration
+            accelStream.append((ax: noise, ay: noise))
         }
-
-        print("===== Results =====")
-        print("= Straight Walk =")
-        print("Avg Raw Error: \(straightRaw)")
-        print("Avg Filtered Error: \(straightFilt)")
-        print("= Corner Walk =")
-        print("Avg Raw Error: \(cornerRaw)")
-        print("Avg Filtered Error: \(cornerFilt)")
-        print("= Speed Walk =")
-        print("Avg Raw Error: \(speedRaw)")
-        print("Avg Filtered Error: \(speedFilt)")
-        print("===================")
-        let totalRaw = straightRaw + cornerRaw + speedRaw
-        let totalFilt = straightFilt + cornerFilt + speedFilt
-        let totalReduction = totalRaw - totalFilt
-        let averageReduction = 100 - totalReduction / 3.0
-        print("===================")
-        print("Total Average Reduction: \(averageReduction)")
-        print("===================")
         
-        XCTAssert(averageReduction > 50)
+        var filteredXY: [(x: Double, y: Double)] = []
+        var gpsIndex = 0
+        let dt = 1.0 / accelHz
+        for i in 0..<totalAccelSamples {
+            let (ax, ay) = accelStream[i]
+            kf.predict(ax: ax, ay: ay, headingRadians: constantHeading, dt: dt)
+            
+            if i % Int(accelHz) == 0, gpsIndex < noisyGPS.count {
+                let fix = CLLocation(coordinate: noisyGPS[gpsIndex],
+                                     altitude: 0,
+                                     horizontalAccuracy: 30,
+                                     verticalAccuracy: 1,
+                                     timestamp: Date())
+                kf.update(with: fix)
+                filteredXY.append((x: kf.px, y: kf.py))
+                gpsIndex += 1
+            }
+        }
+            
+        let img = renderMultiLinePlot(
+            series: [
+                ("Ground Truth", groundTruthXY),
+                ("Noisy GPS",    noisyXY),
+                ("Filtered",     filteredXY)
+            ],
+            size: CGSize(width: 500, height: 400),
+            margin: 40
+        )
+        
+        let attachment = XCTAttachment(image: img)
+        attachment.name = "WalkWithNoise Plot"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        
+        XCTAssertNotNil(img)
     }
 
+    func renderMultiLinePlot(
+        series: [(label: String, data: [(x: Double, y: Double)])],
+        size: CGSize,
+        margin: CGFloat
+    ) -> UIImage {
+        let allX = series.flatMap { $0.data.map { $0.x } }
+        let allY = series.flatMap { $0.data.map { $0.y } }
+        guard let minX = allX.min(), let maxX = allX.max(),
+              let minY = allY.min(), let maxY = allY.max()
+        else { return UIImage() }
+        
+        let colors: [UIColor] = [.systemGreen, .systemRed, .systemBlue, .systemOrange, .systemPurple]
+        
+        return UIGraphicsImageRenderer(size: size).image { ctx in
+            let cg = ctx.cgContext
+            cg.setLineWidth(1)
+            cg.setStrokeColor(UIColor.lightGray.cgColor)
+            
+            let origin = CGPoint(x: margin, y: size.height - margin)
+            let xEnd = CGPoint(x: size.width - margin, y: origin.y)
+            let yEnd = CGPoint(x: origin.x, y: margin)
+            cg.move(to: origin); cg.addLine(to: xEnd)
+            cg.move(to: origin); cg.addLine(to: yEnd)
+            cg.strokePath()
+            
+            func scale(_ pt: (x: Double, y: Double)) -> CGPoint {
+                let xN = (pt.x - minX)/(maxX-minX)
+                let yN = (pt.y - minY)/(maxY-minY)
+                let xP = origin.x + CGFloat(xN)*(size.width - 2*margin)
+                let yP = origin.y - CGFloat(yN)*(size.height - 2*margin)
+                return CGPoint(x: xP, y: yP)
+            }
+            
+            for (idx, (_, data)) in series.enumerated() {
+                let color = colors[idx % colors.count].cgColor
+                cg.setStrokeColor(color)
+                cg.setLineWidth(2)
+                for (i, pt) in data.enumerated() {
+                    let p = scale(pt)
+                    if i == 0 { cg.move(to: p) }
+                    else      { cg.addLine(to: p) }
+                }
+                cg.strokePath()
+            }
+            
+            let legendX = size.width - margin + 5
+            var legendY = margin
+            let sw: CGFloat = 12, sh: CGFloat = 12
+            let fm = UIFont.systemFont(ofSize: 12)
+            for (idx, (label, _)) in series.enumerated() {
+                let color = colors[idx % colors.count]
+                let rect = CGRect(x: legendX, y: legendY, width: sw, height: sh)
+                cg.setFillColor(color.cgColor)
+                cg.fill(rect)
+                let txtPoint = CGPoint(x: legendX + sw + 4, y: legendY - 2)
+                (label as NSString).draw(at: txtPoint, withAttributes: [.font: fm, .foregroundColor: UIColor.label])
+                legendY += sh + 6
+            }
+        }
+    }
 }

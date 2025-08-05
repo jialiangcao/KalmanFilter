@@ -29,7 +29,7 @@ class ViewModel: NSObject, ObservableObject {
         super.init()
         locationManager.delegate = self
         locationManager.headingFilter = kCLHeadingFilterNone
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         locationManager.distanceFilter = kCLDistanceFilterNone
         locationManager.requestWhenInUseAuthorization()
         locationManager.startUpdatingHeading()

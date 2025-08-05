@@ -17,7 +17,6 @@ class KalmanFilter {
     // MARK: - Covariance & Noise Matrices
     // P: 4x4 state covariance, how certain we are about how each value affects another from [-1, 1]: negative correlation -> positive correlation
     private var P = simd_double4x4(0)
-
     
    // H: 4x4 Observation Model
     private let H = simd_double4x4(rows: [
@@ -30,6 +29,7 @@ class KalmanFilter {
     // MARK: - Origin for local ENU projection
     private let originLat: Double
     private let originLon: Double
+    private var count = 0
     
     // MARK: - Init
     // - Parameters:
@@ -46,7 +46,10 @@ class KalmanFilter {
         
         // Convert horizontal accuracy (95% radius) to 1-sigma std dev for position
         // 95% confidence ~ 2 sigma, so sigma = radius / 2
-        let sigma_p = origin.horizontalAccuracy / 2.0
+        
+        //let sigma_p = origin.horizontalAccuracy / 2.0
+        // ^ Doesn't work as expected because GPS is not warmed up and returns accuracy of 0 (very high confidence)
+        let sigma_p = 5.0
         let sigma_p2 = sigma_p * sigma_p
         
         // Velocity initial uncertainty m^2/s
@@ -70,7 +73,6 @@ class KalmanFilter {
     //      - ay: acceleration in y (m/s^2)
     //      - dt: time delta since last predict call (s)
     
-    // TODO: Velocity should not be updated with noisy IMU here
     func predict(ax: Double, ay: Double, headingRadians: Double, dt: Double) {
         // State transition F for constant‐velocity + control:
         // [ px ]   [1 0 dt 0 ][px]   [½dt²  0   ][ax]
@@ -87,6 +89,7 @@ class KalmanFilter {
 
         let dt2 = 0.5 * dt * dt // Formula for distance under constant acceleration
         
+        // Damping factor on velocity
         let F = simd_double4x4(rows: [
             simd_double4(1, 0, dt, 0),
             simd_double4(0, 1, 0, dt),
@@ -110,7 +113,7 @@ class KalmanFilter {
          // Q_vel = dt^2 * accelNoiseVar
          // Off-diagonal terms = (dt^3)/2 * accelNoiseVar
          
-        let accelNoiseVar = 0.25 * 0.25
+        let accelNoiseVar = 1.5 * 1.5
         // Position variance due to integrated acceleration noise
          let q11 = (dt * dt * dt * dt) / 4.0 * accelNoiseVar
         // Covariance between position and velocity
@@ -127,21 +130,14 @@ class KalmanFilter {
         
         // P' = F * P * F^T (transposed) + Q
         // Or P = F·P·Fᵀ + B·Q_acc·Bᵀ + Q
-        // But for simplicity, we approximate process noise by adding Q directly:
+        // But for simplicity, approximating process noise by adding Q directly:
         P = F * P * F.transpose + Q
-//        print("Predict P")
-//        print(P)
-//        print("======")
-//        print("Velocity X Meters: \(vx)")
-//        print("Velocity Y Meters: \(vy)")
-//        print("====")
     }
     
     // MARK: - Update Step
     //
     // - Parameters:
     //      - GPS CoreLocation reading
-    //      TODO: Add velocity in update
     //
     // Steps:
     //    Compute predicted measurement: z^=Hx^z^=Hx^
@@ -157,47 +153,36 @@ class KalmanFilter {
     //    Update estimate covariance: P=(I−KH)PP=(I−KH)P
     func update(with gps: CLLocation) {
         // Convert GPS lat/lon to local x,y in meters
-        // z, standard notation for noisy measurement
         let (zpx, zpy) = gpsToXY(coord: gps.coordinate)
         let z = simd_double4(zpx, zpy, 0, 0)
         
         // Measurement Noise Covariance
-        // Represents how noisy or uncertain the measurements are
-        let sigma_p = gps.horizontalAccuracy / 2.0
-        let sigma_v = 0.002
-        let sp2 = sigma_p * sigma_p
-        let sv2 = sigma_v * sigma_v
+        let variance_p = gps.horizontalAccuracy * gps.horizontalAccuracy / 2.0
+        // asumming sqrt(sigma_x^2 + sigma_y^2) is the horizontalAccuracy formula
 
+        // Use large velocity variance because update does not provide info on velocity
         let R = simd_double4x4(diagonal: simd_double4(
-            sp2,
-            sp2,
-            sv2,
-            sv2
+            variance_p,
+            variance_p,
+            1e7,
+            1e7,
         ))
         
         // Residual, difference between GPS reading and predicted position
-        // y = z - H * x
         let y = z - H * state
         
         // Innovation covariance matrix
-        // S = H * P * H^T + R
         let S = H * P * H.transpose + R
         
         // Kalman Gain
-        // Compute "trust GPS vs prediction"
-        // K = P * H^T * S^-1
         let K = P * H.transpose * S.inverse
         
         // Update State estimate
-        // x = x + K * y
         state += K * y
         
         // Update estimate covariance
-        // P = (I - K * H) * P
         let I = matrix_identity_double4x4
         P = (I - K * H) * P
-//        print("Update P")
-//        print(P)
     }
 
     // Accessors
