@@ -14,6 +14,23 @@ A lightweight **2D Kalman Filter** implementation in Swift that fuses CoreMotion
 
 ---
 
+## 🖼️ Examples
+
+### 📉 Walk with Noise ###
+
+Raw GPS vs. Kalman-filtered path showing reduced noise.
+![Example Plot](images/walknoiseplot.png)
+
+### 📈 Walk Velocity Plot ###
+
+Estimated path during walking with velcocity changes and Kalman smoothing.
+![Example Plot](images/walkvelocityplot.png)
+
+### 🔁 Walk with Turn ###
+
+Trajectory showing a walking path with a turn.
+![Example Plot](images/walkturnplot.png)
+
 ## 🏗️ Getting Started
 
 ### Requirements

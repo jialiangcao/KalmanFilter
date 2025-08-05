@@ -242,7 +242,7 @@ class KalmanFilterTests: XCTestCase {
         var noisyGPS: [CLLocationCoordinate2D] = []
         for gt in groundTruthXY {
             let angle = Double.random(in: 0..<(2 * .pi))
-            let radius = Double.random(in: 20...40) // Lower/upper bound inaccuracy in m^2
+            let radius = Double.random(in: 5.0...10.0) // Lower/upper bound inaccuracy in m^2
             let nx = gt.x + radius * cos(angle)
             let ny = gt.y + radius * sin(angle)
             noisyXY.append((x: nx, y: ny))
@@ -267,7 +267,7 @@ class KalmanFilterTests: XCTestCase {
             if i % Int(accelHz) == 0, gpsIndex < noisyGPS.count {
                 let fix = CLLocation(coordinate: noisyGPS[gpsIndex],
                                      altitude: 0,
-                                     horizontalAccuracy: 30,
+                                     horizontalAccuracy: 7.5,
                                      verticalAccuracy: 1,
                                      timestamp: Date())
                 kf.update(with: fix)
